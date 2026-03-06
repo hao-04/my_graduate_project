@@ -155,17 +155,17 @@ def evaluate(model, loader, criterion, device) -> Dict[str, float]:
 
 
 def suggest_hparams(trial: optuna.trial.Trial) -> Dict[str, float]:
-    d_model = trial.suggest_categorical("d_model", [64, 96, 128, 160, 192])
+    d_model = trial.suggest_categorical("d_model", [64, 128, 256])
     params = {
-        "gcn_hidden": trial.suggest_categorical("gcn_hidden", [32, 64, 96, 128]),
+        "gcn_hidden": trial.suggest_categorical("gcn_hidden", [32, 64, 128]),
         "d_model": d_model,
         "nhead": trial.suggest_categorical("nhead", [2, 4, 8]),
         "num_encoder_layers": trial.suggest_int("num_encoder_layers", 2, 5),
         "dim_ff": 4 * d_model,
         "dropout": trial.suggest_float("dropout", 0.1, 0.5),
-        "lr": trial.suggest_float("lr", 1e-5, 5e-3, log=True),
-        "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True),
-        "batch_size": trial.suggest_categorical("batch_size", [4, 8, 16]),
+        "lr": trial.suggest_float("lr", 1e-5, 2e-3, log=True),
+        "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True),
+        "batch_size": trial.suggest_categorical("batch_size", [8, 16, 32, 64]),
     }
     return params
 
