@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 from sklearn.model_selection import GroupKFold
-from torch.optim import AdamW
+from torch.optim import Adam, AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 
@@ -205,6 +205,68 @@ def load_all_samples_with_groups(normal_path: str, stroke_path: str):
     return X, y, groups, stats
 
 
+def _find_latest_optuna_run(optuna_root: Path) -> Path:
+    if not optuna_root.exists():
+        raise FileNotFoundError(f"Optuna 目录不存在: {optuna_root}")
+
+    run_dirs = [p for p in optuna_root.iterdir() if p.is_dir()]
+    if not run_dirs:
+        raise FileNotFoundError(f"在 {optuna_root} 下未找到 Optuna 运行目录")
+
+    # 运行目录命名为 YYYYMMDD_HHMMSS，按字典序可得到最新目录
+    run_dirs.sort(key=lambda p: p.name)
+    return run_dirs[-1]
+
+
+def _load_optuna_summary(optuna_run_dir: Path) -> dict:
+    summary_files = sorted(optuna_run_dir.glob("optuna_summary_*.json"))
+    if not summary_files:
+        raise FileNotFoundError(f"未找到 optuna_summary_*.json: {optuna_run_dir}")
+    with open(summary_files[-1], "r") as f:
+        return json.load(f)
+
+
+def _load_cv_splits(optuna_run_dir: Path, summary: dict):
+    cv_splits_file = summary.get("cv_splits_file")
+    if cv_splits_file:
+        cv_splits_path = optuna_run_dir / cv_splits_file
+    else:
+        split_files = sorted(optuna_run_dir.glob("cv_splits_*.json"))
+        if not split_files:
+            raise FileNotFoundError(f"未找到 cv_splits_*.json: {optuna_run_dir}")
+        cv_splits_path = split_files[-1]
+
+    with open(cv_splits_path, "r") as f:
+        raw_splits = json.load(f)
+
+    splits = []
+    for rec in raw_splits:
+        train_idx = np.asarray(rec["train_indices"], dtype=np.int64)
+        val_idx = np.asarray(rec["val_indices"], dtype=np.int64)
+        splits.append((train_idx, val_idx))
+    return splits, cv_splits_path
+
+
+def _apply_optuna_best_params(args, best_params: dict):
+    args.gcn_hidden = int(best_params["gcn_hidden"])
+    args.d_model = int(best_params["d_model"])
+    args.nhead = int(best_params["nhead"])
+    args.num_encoder_layers = int(best_params["num_encoder_layers"])
+    args.dim_ff = 4 * args.d_model
+    args.dropout = float(best_params["dropout"])
+    args.lr = float(best_params["lr"])
+    args.weight_decay = float(best_params["weight_decay"])
+    args.batch_size = int(best_params["batch_size"])
+    args.optimizer = str(best_params.get("optimizer", "AdamW"))
+    args.apply_zscore = bool(best_params.get("apply_zscore", False))
+
+
+def _create_optimizer(model: nn.Module, args):
+    if args.optimizer == "Adam":
+        return Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    return AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
+
 def run_single_fold(fold_idx, train_idx, val_idx, X, y, groups, args, device, save_dir: Path):
     train_groups = set(groups[train_idx].tolist())
     val_groups = set(groups[val_idx].tolist())
@@ -217,7 +279,7 @@ def run_single_fold(fold_idx, train_idx, val_idx, X, y, groups, args, device, sa
     zscore_mean, zscore_std = None, None
     if args.apply_zscore:
         X_train, zscore_mean, zscore_std = zscore_normalize(X_train)
-        X_val, _, _ = zscore_normalize(X_val, mean=zscore_mean, std=zscore_std)
+        X_val, _, _ = zscore_normalize(X_val)
 
     train_dataset = GaitDataset(X_train, y_train)
     val_dataset = GaitDataset(X_val, y_val)
@@ -248,7 +310,7 @@ def run_single_fold(fold_idx, train_idx, val_idx, X, y, groups, args, device, sa
     model = GCN_BERT(
         num_classes=args.num_classes,
         gcn_hidden=args.gcn_hidden,
-        d_model=84,
+        d_model=args.d_model,
         nhead=args.nhead,
         num_encoder_layers=args.num_encoder_layers,
         dim_feedforward=args.dim_ff,
@@ -256,7 +318,7 @@ def run_single_fold(fold_idx, train_idx, val_idx, X, y, groups, args, device, sa
     ).to(device)
 
     criterion = nn.CrossEntropyLoss(weight=class_weights)
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = _create_optimizer(model, args)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr * 0.01)
 
     best_val_f1 = -1.0
@@ -427,13 +489,14 @@ def plot_training_curves(history, save_path: Path, fold_idx: int):
 def parse_args():
     parser = argparse.ArgumentParser(description="GCN-BERT GroupKFold 交叉验证训练")
 
-    parser.add_argument("--normal_path", type=str, default="data/normal_LsideSegm_28markers.pkl")
-    parser.add_argument("--stroke_path", type=str, default="data/stroke_NsideSegm_28markers.pkl")
-    parser.add_argument("--apply_zscore", action="store_true", help="是否使用 Z-score 归一化")
+    parser.add_argument("--normal_path", type=str, default="data/opendata/normal_LsideSegm_28markers.pkl")
+    parser.add_argument("--stroke_path", type=str, default="data/opendata/stroke_NsideSegm_28markers.pkl")
+    parser.add_argument("--apply_zscore", action="store_true", help="是否使用 Z-score 归一化（若加载 Optuna 最优参数会被覆盖）")
     parser.add_argument("--k_folds", type=int, default=5)
     parser.add_argument("--num_classes", type=int, default=2)
 
     parser.add_argument("--gcn_hidden", type=int, default=64)
+    parser.add_argument("--d_model", type=int, default=128)
     parser.add_argument("--nhead", type=int, default=6)
     parser.add_argument("--num_encoder_layers", type=int, default=3)
     parser.add_argument("--dim_ff", type=int, default=256)
@@ -443,12 +506,16 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
+    parser.add_argument("--optimizer", type=str, default="AdamW", choices=["Adam", "AdamW"])
     parser.add_argument("--patience", type=int, default=20)
 
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_dir", type=str, default="output/kfold")
+    parser.add_argument("--optuna_root", type=str, default="output/optuna")
+    parser.add_argument("--optuna_run_dir", type=str, default="", help="指定 Optuna 运行目录；为空时自动取最新")
+    parser.add_argument("--no_use_optuna_best", action="store_true", help="不加载 Optuna 最佳参数与划分")
 
     return parser.parse_args()
 
@@ -469,6 +536,31 @@ def main(args):
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     logger.info("Device: %s", device)
+
+    optuna_summary = None
+    cv_splits_from_optuna = None
+    cv_splits_path = None
+    selected_optuna_run = None
+
+    if not args.no_use_optuna_best:
+        if args.optuna_run_dir.strip():
+            selected_optuna_run = Path(args.optuna_run_dir)
+        else:
+            selected_optuna_run = _find_latest_optuna_run(Path(args.optuna_root))
+
+        optuna_summary = _load_optuna_summary(selected_optuna_run)
+        best_trial = optuna_summary.get("best_trial", {})
+        best_params = best_trial.get("params", {})
+        if not best_params:
+            raise ValueError(f"Optuna summary 中缺少 best_trial.params: {selected_optuna_run}")
+
+        _apply_optuna_best_params(args, best_params)
+        cv_splits_from_optuna, cv_splits_path = _load_cv_splits(selected_optuna_run, optuna_summary)
+        args.k_folds = len(cv_splits_from_optuna)
+
+        logger.info("使用 Optuna 运行目录: %s", selected_optuna_run)
+        logger.info("使用 Optuna 划分文件: %s", cv_splits_path)
+        logger.info("使用 Optuna 最佳参数: %s", best_params)
 
     X, y, groups, stats = load_all_samples_with_groups(
         normal_path=args.normal_path,
@@ -492,10 +584,15 @@ def main(args):
     if args.k_folds > n_subjects:
         raise ValueError(f"k_folds={args.k_folds} 大于受试者数 {n_subjects}")
 
-    splitter = GroupKFold(n_splits=args.k_folds)
+    if cv_splits_from_optuna is not None:
+        splitter = cv_splits_from_optuna
+        logger.info("按 Optuna 保存的索引划分进行训练，共 %d 折", len(splitter))
+    else:
+        splitter = list(GroupKFold(n_splits=args.k_folds).split(X, y, groups))
+        logger.info("按当前 GroupKFold 重新划分进行训练，共 %d 折", len(splitter))
 
     fold_results = []
-    for fold_idx, (train_idx, val_idx) in enumerate(splitter.split(X, y, groups), start=1):
+    for fold_idx, (train_idx, val_idx) in enumerate(splitter, start=1):
         result = run_single_fold(
             fold_idx=fold_idx,
             train_idx=train_idx,
@@ -529,6 +626,9 @@ def main(args):
     summary = {
         "dataset_stats": stats,
         "k_folds": int(args.k_folds),
+        "optuna_run_dir": "" if selected_optuna_run is None else str(selected_optuna_run),
+        "optuna_cv_splits": "" if cv_splits_path is None else str(cv_splits_path),
+        "optuna_best_params": {} if optuna_summary is None else optuna_summary["best_trial"]["params"],
         "fold_results": fold_results,
         "summary_metrics": summary_metrics,
     }
