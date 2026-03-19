@@ -165,7 +165,7 @@ def main(args):
     model = GCN_BERT(
         num_classes=args.num_classes,
         gcn_hidden=args.gcn_hidden,
-        d_model=84,
+        d_model=128,
         nhead=args.nhead,
         num_encoder_layers=args.num_encoder_layers,
         dim_feedforward=args.dim_ff,
@@ -310,17 +310,17 @@ def parse_args():
     parser.add_argument("--num_classes", type=int, default=2)
 
     # 模型
-    parser.add_argument("--gcn_hidden", type=int, default=64)
-    parser.add_argument("--nhead", type=int, default=6)
+    parser.add_argument("--gcn_hidden", type=int, default=32)
+    parser.add_argument("--nhead", type=int, default=8)
     parser.add_argument("--num_encoder_layers", type=int, default=3)
-    parser.add_argument("--dim_ff", type=int, default=256)
-    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--dim_ff", type=int, default=512)
+    parser.add_argument("--dropout", type=float, default=0.30751624869734645)
 
     # 训练
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--weight_decay", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=0.00041463667378761307)
+    parser.add_argument("--weight_decay", type=float, default=1.2327891605450794e-05)
     parser.add_argument("--patience", type=int, default=20,
                         help="早停耐心值，0 表示不早停")
 
